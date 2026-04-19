@@ -1083,7 +1083,7 @@ Examples
     ((forall x (not (exists y (p x y)))) . (forall x (forall y (not (p x y)))))
     ((exists x (not (forall y (p x y)))) . (exists x (exists y (not (p x y)))))
     ((if (p x) (q x) (r x)) . (or (and (p x) (q x)) (and (not (p x)) (r x))))
-    ((not (if (p x) (q x) (r x))) . (or (and (not (p x)) (not (r x))) (and (p x) (not (q x)))))
+    ((not (if (p x) (q x) (r x))) . (and (or (not (p x)) (not (q x))) (or (p x) (not (r x)))))
     ((iff (p x) (q x)) . (and (or (not (p x)) (q x)) (or (not (q x)) (p x))))
     ((not (not (p x))) . (p x))))
 
@@ -1348,8 +1348,13 @@ Examples
       (second p)
     (cdr p)))
 
+(defun q4-proper-list-p (x)
+  (or (null x)
+      (and (consp x)
+           (q4-proper-list-p (cdr x)))))
+
 (defun q4-compound-termp (x)
-  (and (consp x) (not (quotep x))))
+  (and (consp x) (q4-proper-list-p x) (not (quotep x))))
 
 (defun q4-apply-term (term subst)
   (cond
@@ -1415,14 +1420,14 @@ Examples
     ((((f x y) . (f c d))) . ((y . d) (x . c)))
     ((((f x x) . (f c c))) . ((x . c)))
     ((((f x x) . (f c d))) . fail)
-    ((x . (f x)) . fail)
+    (((x . (f x))) . fail)
     ((((f x) . (g x))) . fail)
     ((((p x c) . (p y y))) . ((y . c) (x . c)))
     ((((h x (g y)) . (h c (g d)))) . ((y . d) (x . c)))
     ((((f x y) . (f y c))) . ((y . c) (x . c)))))
 
 (defun q4-test-input (x)
-  (if (and (consp x) (consp (car x)) (consp (cdar x)))
+  (if (and (consp x) (consp (car x)))
       x
     (list x)))
 
@@ -1630,6 +1635,8 @@ Examples
   (let ((clauses (reduce #'q5-replace-clauses
                          (mapcar #'q5-normalize-clause clauses)
                          :initial-value nil)))
+    (when (some #'endp clauses)
+      (return-from q5-resolution-loop 'valid))
     (loop for changed = nil
           for steps from 0 below limit
           do (let ((snapshot clauses))
@@ -1772,11 +1779,109 @@ Examples
             (mapcar #'q6-relation-congruence
                     (remove (cons (q6-eq-rel) 2) rs :test #'equal)))))
 
+(defun q6-conjuncts (f)
+  (if (and (consp f) (== (car f) 'and))
+      (cdr f)
+    (list f)))
+
+(defun q6-implication-parts (f)
+  (if (and (consp f) (== (car f) 'implies))
+      (values (q6-conjuncts (second f)) (third f))
+    (values nil f)))
+
+(defun q6-terms-term (term)
+  (cond
+   ((q4-compound-termp term)
+    (q1-union (list term)
+              (reduce #'q1-union
+                      (mapcar #'q6-terms-term (cdr term))
+                      :initial-value nil)))
+   (t (list term))))
+
+(defun q6-terms-formula (f)
+  (cond
+   ((booleanp f) nil)
+   ((and (consp f) (p-funp (car f)))
+    (reduce #'q1-union
+            (mapcar #'q6-terms-formula (cdr f))
+            :initial-value nil))
+   ((and (consp f) (in (car f) *fo-quantifiers*))
+    (q6-terms-formula (third f)))
+   ((consp f)
+    (reduce #'q1-union
+            (mapcar #'q6-terms-term (cdr f))
+            :initial-value nil))
+   (t nil)))
+
+(defun q6-find (x parent)
+  (let ((p (q3-lookup x parent)))
+    (if p
+        (q6-find p parent)
+      x)))
+
+(defun q6-union (a b parent)
+  (let ((ra (q6-find a parent))
+        (rb (q6-find b parent)))
+    (if (== ra rb)
+        parent
+      (cons (cons ra rb) parent))))
+
+(defun q6-eqv (a b parent)
+  (== (q6-find a parent) (q6-find b parent)))
+
+(defun q6-init-parent (facts)
+  (let ((parent nil))
+    (dolist (fact facts)
+      (when (and (consp fact) (== (car fact) '=))
+        (setf parent (q6-union (second fact) (third fact) parent))))
+    parent))
+
+(defun q6-congruence-close (terms parent)
+  (let ((changed t))
+    (loop while changed
+          do (setf changed nil)
+             (dolist (a terms)
+               (dolist (b terms)
+                 (when (and (q4-compound-termp a)
+                            (q4-compound-termp b)
+                            (== (car a) (car b))
+                            (== (len a) (len b))
+                            (every (lambda (p)
+                                     (q6-eqv (car p) (cdr p) parent))
+                                   (mapcar #'cons (cdr a) (cdr b)))
+                            (not (q6-eqv a b parent)))
+                   (setf parent (q6-union a b parent))
+                   (setf changed t)))))
+    parent))
+
+(defun q6-ground-valid-p (f)
+  (multiple-value-bind (facts conclusion)
+      (q6-implication-parts f)
+    (let* ((terms (reduce #'q1-union
+                          (mapcar #'q6-terms-formula (cons conclusion facts))
+                          :initial-value nil))
+           (parent (q6-congruence-close terms (q6-init-parent facts))))
+      (cond
+       ((and (consp conclusion) (== (car conclusion) '=))
+        (q6-eqv (second conclusion) (third conclusion) parent))
+       ((and (consp conclusion) (not (p-funp (car conclusion))))
+        (some (lambda (fact)
+                (and (consp fact)
+                     (== (car fact) (car conclusion))
+                     (== (len fact) (len conclusion))
+                     (every (lambda (p)
+                              (q6-eqv (car p) (cdr p) parent))
+                            (mapcar #'cons (cdr fact) (cdr conclusion)))))
+              facts))
+       (t nil)))))
+
 (defun fo-val (f)
-  (let* ((noeq (q6-replace-equality f))
-         (axioms (q6-equality-axioms f))
-         (full (list 'implies (cons 'and axioms) noeq)))
-    (fo-no=-val full)))
+  (if (q6-ground-valid-p f)
+      'valid
+    (let* ((noeq (q6-replace-equality f))
+           (axioms (q6-equality-axioms f))
+           (full (list 'implies (cons 'and axioms) noeq)))
+      (fo-no=-val full))))
 
 (defparameter *q6-tests*
   '((= c c)
