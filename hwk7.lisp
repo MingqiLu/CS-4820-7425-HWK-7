@@ -13,8 +13,8 @@
 
  The group members are:
 
- ... (put the names of the group members here)
- 
+ Mingqi Lu
+
  To make sure that we are all on the same page, build the latest
  version of ACL2s, as per HWK1. You are going to be using SBCL, which
  you already have, due to the build process in
