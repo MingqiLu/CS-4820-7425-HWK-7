@@ -1356,15 +1356,22 @@ Examples
 (defun q4-compound-termp (x)
   (and (consp x) (q4-proper-list-p x) (not (quotep x))))
 
-(defun q4-apply-term (term subst)
+(defun q4-apply-term-seen (term subst seen)
   (cond
    ((variable-symbolp term)
     (let ((look (q3-lookup term subst)))
-      (if look (q4-apply-term look subst) term)))
+      (if (and look
+               (!= look term)
+               (not (in term seen)))
+          (q4-apply-term-seen look subst (cons term seen))
+        term)))
    ((q4-compound-termp term)
     (cons (car term)
-          (mapcar (lambda (x) (q4-apply-term x subst)) (cdr term))))
+          (mapcar (lambda (x) (q4-apply-term-seen x subst seen)) (cdr term))))
    (t term)))
+
+(defun q4-apply-term (term subst)
+  (q4-apply-term-seen term subst nil))
 
 (defun q4-occurs-p (v term subst)
   (let ((term (q4-apply-term term subst)))
@@ -1494,32 +1501,55 @@ Examples
 (defun q5-negative-literal-p (lit)
   (and (consp lit) (== (car lit) 'not) (== (len lit) 2)))
 
+(defun q5-positive-literal-p (lit)
+  (not (q5-negative-literal-p lit)))
+
+(defun q5-all-positive-clause-p (clause)
+  (every #'q5-positive-literal-p clause))
+
 (defun q5-positive-part (lit)
   (if (q5-negative-literal-p lit) (second lit) lit))
+
+(defun q5-lit-head (lit)
+  (let ((p (q5-positive-part lit)))
+    (if (consp p) (car p) p)))
 
 (defun q5-complementary-p (a b)
   (or (and (q5-negative-literal-p a)
            (not (q5-negative-literal-p b))
-           (== (car (second a)) (car b))
-           (== (len (second a)) (len b)))
+           (== (q5-lit-head a) (q5-lit-head b))
+           (== (len (q5-lit-terms a)) (len (q5-lit-terms b))))
       (and (q5-negative-literal-p b)
            (not (q5-negative-literal-p a))
-           (== (car a) (car (second b)))
-           (== (len a) (len (second b))))))
+           (== (q5-lit-head a) (q5-lit-head b))
+           (== (len (q5-lit-terms a)) (len (q5-lit-terms b))))))
 
 (defun q5-lit-terms (lit)
-  (cdr (q5-positive-part lit)))
+  (let ((p (q5-positive-part lit)))
+    (if (consp p) (cdr p) nil)))
 
 (defun q5-unify-lits (a b)
   (if (q5-complementary-p a b)
       (unify (mapcar #'cons (q5-lit-terms a) (q5-lit-terms b)))
     'fail))
 
+(defun q5-same-sign-unify-lits (a b)
+  (if (and (== (q5-negative-literal-p a) (q5-negative-literal-p b))
+           (== (q5-lit-head a) (q5-lit-head b))
+           (== (len (q5-lit-terms a)) (len (q5-lit-terms b))))
+      (unify (mapcar #'cons (q5-lit-terms a) (q5-lit-terms b)))
+    'fail))
+
+(defun q5-unifiable-p (a b)
+  (!= (q5-unify-lits a b) 'fail))
+
 (defun q5-apply-lit (lit subst)
   (if (q5-negative-literal-p lit)
       (list 'not (q5-apply-lit (second lit) subst))
-    (cons (car lit)
-          (mapcar (lambda (x) (q4-apply-term x subst)) (cdr lit)))))
+    (if (consp lit)
+        (cons (car lit)
+              (mapcar (lambda (x) (q4-apply-term x subst)) (cdr lit)))
+      lit)))
 
 (defun q5-normalize-clause (clause)
   (let ((clause (remove-dups (remove nil clause :test #'equal))))
@@ -1534,41 +1564,33 @@ Examples
    (mapcar (lambda (lit) (q5-apply-lit lit subst)) clause)))
 
 (defun q5-clause-subsumes-p (a b)
-  (some (lambda (sub)
-          (and (!= sub 'fail)
-               (let ((aa (q5-apply-clause a sub)))
-                 (and (!= aa 'tautology)
-                      (every (lambda (lit) (in lit b)) aa)))))
-        (q5-subsumption-substs a b nil)))
+  (q5-subsumption-substs a b nil))
 
 (defun q5-subsumption-substs (a b subst)
   (if (endp a)
-      (list subst)
-    (mapcan
-     (lambda (litb)
-       (let* ((lita (q5-apply-lit (car a) subst))
-              (litb (q5-apply-lit litb subst))
-              (sub (q5-match-lit lita litb)))
-         (if (== sub 'fail)
-             nil
-           (let ((merged (q5-merge-substs sub subst)))
-             (if (== merged 'fail)
-                 nil
-               (q5-subsumption-substs (cdr a) b merged))))))
-     b)))
+      t
+    (some (lambda (litb)
+            (let ((next (q5-match-lit (car a) litb subst)))
+              (and (!= next 'fail)
+                   (q5-subsumption-substs (cdr a) b next))))
+          b)))
 
-(defun q5-match-lit (pattern target)
+(defun q5-match-lit (pattern target subst)
   (cond
+   ((and (symbolp pattern)
+         (symbolp target)
+         (== pattern target))
+    subst)
    ((and (q5-negative-literal-p pattern)
          (q5-negative-literal-p target)
-         (== (car (second pattern)) (car (second target)))
-         (== (len (second pattern)) (len (second target))))
-    (q5-match-terms (cdr (second pattern)) (cdr (second target)) nil))
+         (== (q5-lit-head pattern) (q5-lit-head target))
+         (== (len (q5-lit-terms pattern)) (len (q5-lit-terms target))))
+    (q5-match-terms (q5-lit-terms pattern) (q5-lit-terms target) subst))
    ((and (not (q5-negative-literal-p pattern))
          (not (q5-negative-literal-p target))
-         (== (car pattern) (car target))
-         (== (len pattern) (len target)))
-    (q5-match-terms (cdr pattern) (cdr target) nil))
+         (== (q5-lit-head pattern) (q5-lit-head target))
+         (== (len (q5-lit-terms pattern)) (len (q5-lit-terms target))))
+    (q5-match-terms (q5-lit-terms pattern) (q5-lit-terms target) subst))
    (t 'fail)))
 
 (defun q5-match-terms (patterns targets subst)
@@ -1596,16 +1618,6 @@ Examples
       (q5-match-terms (cdr pattern) (cdr target) subst))
      (t 'fail))))
 
-(defun q5-merge-substs (a b)
-  (let ((res b))
-    (dolist (p a)
-      (let ((new (unify (list (cons (q4-apply-term (car p) res)
-                                    (q4-apply-term (cdr p) res))))))
-        (if (== new 'fail)
-            (return-from q5-merge-substs 'fail)
-          (setf res (append new res)))))
-    res))
-
 (defun q5-replace-clauses (clauses new)
   (if (or (== new 'tautology)
           (some (lambda (old) (q5-clause-subsumes-p old new)) clauses))
@@ -1613,64 +1625,198 @@ Examples
     (cons new
           (remove-if (lambda (old) (q5-clause-subsumes-p new old)) clauses))))
 
-(defun q5-resolvent (c1 c2 l1 l2)
-  (let ((sub (q5-unify-lits l1 l2)))
+(defun q5-all-subsets (l)
+  (if (endp l)
+      (list nil)
+    (let ((rest (q5-all-subsets (cdr l))))
+      (append rest
+              (mapcar (lambda (x) (cons (car l) x)) rest)))))
+
+(defun q5-all-nonempty-subsets (l)
+  (remove nil (q5-all-subsets l) :test #'equal))
+
+(defun q5-remove-members (source members)
+  (reduce (lambda (acc x)
+            (remove x acc :test #'equal :count 1))
+          members
+          :initial-value source))
+
+(defun q5-rename-clause (prefix clause)
+  (declare (ignore prefix))
+  (let* ((vars (remove-dups (q1-free-vars-formula (cons 'or clause))))
+         (new-vars (mapcar (lambda (v)
+                             (declare (ignore v))
+                             (q3-fresh-var))
+                           vars))
+         (subst (mapcar #'cons vars new-vars)))
+    (q5-apply-clause clause subst)))
+
+(defun q5-literal-terms-pairs (lits)
+  (let ((first (car lits))
+        (rest (cdr lits)))
+    (if (endp rest)
+        nil
+      (append
+       (mapcan (lambda (lit)
+                 (mapcar #'cons
+                         (q5-lit-terms first)
+                         (q5-lit-terms lit)))
+               rest)
+       (q5-literal-terms-pairs rest)))))
+
+(defun q5-build-resolvent (cl1 cl2 s1 s2)
+  (let ((sub (unify (q5-literal-terms-pairs (append s1 (mapcar #'q1-make-not s2))))))
     (if (== sub 'fail)
         'fail
       (q5-apply-clause
-       (append (remove l1 c1 :test #'equal :count 1)
-               (remove l2 c2 :test #'equal :count 1))
+       (append (q5-remove-members cl1 s1)
+               (q5-remove-members cl2 s2))
        sub))))
 
 (defun q5-all-resolvents (c1 c2)
-  (let ((res nil))
-    (dolist (l1 c1)
-      (dolist (l2 c2)
-        (let ((r (q5-resolvent c1 c2 l1 l2)))
-          (when (!= r 'fail)
-            (push r res)))))
-    res))
+  (let* ((cl1 (q5-rename-clause "X" c1))
+         (cl2 (q5-rename-clause "Y" c2))
+         (res nil))
+    (dolist (p cl1)
+      (let ((ps2 (remove-if-not (lambda (q) (!= (q5-unify-lits p q) 'fail)) cl2)))
+        (unless (endp ps2)
+          (let ((ps1 (remove-if-not (lambda (q)
+                                      (and (!= q p)
+                                           (!= (q5-same-sign-unify-lits p q) 'fail)))
+                                    cl1)))
+            (dolist (s1-tail (q5-all-subsets ps1))
+              (let ((s1 (cons p s1-tail)))
+                (dolist (s2 (q5-all-nonempty-subsets ps2))
+                  (let ((r (q5-build-resolvent cl1 cl2 s1 s2)))
+                    (when (!= r 'fail)
+                      (push r res))))))))))
+    (remove-dups res)))
+
+(defun q5-positive-resolvents (c1 c2)
+  (if (or (q5-all-positive-clause-p c1)
+          (q5-all-positive-clause-p c2))
+      (remove-dups (append (q5-all-resolvents c1 c2)
+                           (q5-all-resolvents c2 c1)))
+    nil))
+
+(defun q5-shortest-clause (clauses)
+  (reduce (lambda (best next)
+            (if (< (len next) (len best)) next best))
+          clauses))
 
 (defun q5-resolution-loop (clauses &optional (limit 1000))
-  (let ((clauses (reduce #'q5-replace-clauses
-                         (mapcar #'q5-normalize-clause clauses)
-                         :initial-value nil)))
+  (let* ((clauses (reduce #'q5-replace-clauses
+                          (mapcar #'q5-normalize-clause clauses)
+                          :initial-value nil))
+         (pending clauses))
     (when (some #'endp clauses)
       (return-from q5-resolution-loop 'valid))
-    (loop for changed = nil
-          for steps from 0 below limit
-          do (let ((snapshot clauses))
-               (dolist (c1 snapshot)
-                 (dolist (c2 snapshot)
-                   (dolist (r (q5-all-resolvents c1 c2))
-                     (when (endp r)
-                       (return-from q5-resolution-loop 'valid))
-                     (let ((next (q5-replace-clauses clauses r)))
-                       (when (!= next clauses)
-                         (setf clauses next)
-                         (setf changed t)))))))
-             (unless changed
-               (return clauses)))
+    (loop for steps from 0 below limit
+          while pending
+          do (let* ((c1 (q5-shortest-clause pending))
+                   (snapshot clauses))
+               (setf pending (remove c1 pending :test #'equal :count 1))
+               (dolist (c2 snapshot)
+                 (dolist (r (q5-positive-resolvents c1 c2))
+                   (when (endp r)
+                     (return-from q5-resolution-loop 'valid))
+                   (let ((next (q5-replace-clauses clauses r)))
+                     (when (!= next clauses)
+                       (setf clauses next)
+                       (when (member r clauses :test #'equal)
+                         (pushnew r pending :test #'equal))))))))
+    clauses))
+
+(defun q5-resolution-loop-sos (usable sos &optional (limit 1000))
+  (let* ((clauses (reduce #'q5-replace-clauses
+                          (mapcar #'q5-normalize-clause (append usable sos))
+                          :initial-value nil))
+         (pending (remove-if-not (lambda (c) (member c clauses :test #'equal))
+                                 (mapcar #'q5-normalize-clause sos))))
+    (when (some #'endp clauses)
+      (return-from q5-resolution-loop-sos 'valid))
+    (loop for steps from 0 below limit
+          while pending
+          do (let* ((c1 (q5-shortest-clause pending))
+                    (snapshot clauses))
+               (setf pending (remove c1 pending :test #'equal :count 1))
+               (dolist (c2 snapshot)
+                 (dolist (r (q5-positive-resolvents c1 c2))
+                   (when (endp r)
+                     (return-from q5-resolution-loop-sos 'valid))
+                   (let ((next (q5-replace-clauses clauses r)))
+                     (when (!= next clauses)
+                       (setf clauses next)
+                       (when (member r clauses :test #'equal)
+                         (pushnew r pending :test #'equal))))))))
     clauses))
 
 (defun fo-no=-val (f)
-  (let* ((neg (list 'not f))
-         (cnf (simp-skolem-pnf-cnf neg))
-         (clauses (q5-cnf-clauses cnf))
-         (res (q5-resolution-loop clauses)))
+  (let ((res
+         (if (and (consp f) (== (car f) 'implies))
+             (let* ((usable (q5-cnf-clauses (simp-skolem-pnf-cnf (second f))))
+                    (sos (q5-cnf-clauses
+                          (simp-skolem-pnf-cnf (list 'not (third f))))))
+               (q5-resolution-loop-sos usable sos))
+           (let* ((neg (list 'not f))
+                  (cnf (simp-skolem-pnf-cnf neg))
+                  (clauses (q5-cnf-clauses cnf)))
+             (q5-resolution-loop clauses)))))
     (if (== res 'valid) 'valid res)))
 
+(defparameter *q5-p38*
+  '(forall x
+     (iff
+      (implies
+       (and (p a)
+            (implies (p x) (exists y (and (p y) (r x y)))))
+       (exists z w (and (p z) (r x w) (r w z))))
+      (and (or (not (p a))
+               (p x)
+               (exists z w (and (p z) (r x w) (r w z))))
+           (or (not (p a))
+               (not (exists y (and (p y) (r x y))))
+               (exists z w (and (p z) (r x w) (r w z))))))))
+
+(defparameter *q5-p34*
+  '(iff
+    (iff (exists x (forall y (iff (p x) (p y))))
+         (iff (exists x (q x)) (forall y (q y))))
+    (iff (exists x (forall y (iff (q x) (q y))))
+         (iff (exists x (p x)) (forall y (p y))))))
+
+(defparameter *q5-ewd1062*
+  '(implies
+    (and (forall x (<= x x))
+         (forall (x y z) (implies (and (<= x y) (<= y z)) (<= x z)))
+         (forall (x y) (iff (<= (f x) y) (<= x (g y)))))
+    (and (forall (x y) (implies (<= x y) (<= (f x) (f y))))
+         (forall (x y) (implies (<= x y) (<= (g x) (g y)))))))
+
+(defparameter *q5-barb*
+  '(not (exists b (forall x (iff (shaves b x) (not (shaves x x)))))))
+
+(defparameter *q5-los*
+  '(implies
+    (and (forall (x y z) (implies (and (p x y) (p y z)) (p x z)))
+         (forall (x y z) (implies (and (q x y) (q y z)) (q x z)))
+         (forall (x y) (implies (q x y) (q y x)))
+         (forall (x y) (or (p x y) (q x y))))
+    (or (forall (x y) (p x y))
+        (forall (x y) (q x y)))))
+
 (defparameter *q5-tests*
-  '((or (p c) (not (p c)))
-    (implies (and (p c) (implies (p c) (q c))) (q c))
-    (implies (forall x (implies (p x) (q x))) (implies (p c) (q c)))
-    (implies (and (forall x (implies (p x) (q x))) (p c)) (q c))
-    (implies (and (forall x (implies (human x) (mortal x))) (human c)) (mortal c))
-    (implies (and (forall x (implies (p x) (r x))) (forall x (implies (r x) (q x))) (p c)) (q c))
-    (implies (exists x (p x)) (exists y (p y)))
-    (implies (forall x (p x)) (p c))
-    (implies (p c) (exists x (p x)))
-    (implies (and (or (p c) (q c)) (not (p c))) (q c))))
+  (list
+   '(or (p c) (not (p c)))
+   *q5-p38*
+   *q5-p34*
+   *q5-ewd1062*
+   *q5-barb*
+   *q5-los*
+   '(implies (and (p c) (implies (p c) (q c))) (q c))
+   '(implies (forall x (implies (p x) (q x))) (implies (p c) (q c)))
+   '(implies (and (forall x (implies (p x) (q x))) (p c)) (q c))
+   '(implies (p c) (exists x (p x)))))
 
 (defun q5-run-tests ()
   (mapcar (lambda (test)
@@ -1768,8 +1914,8 @@ Examples
          (hyps (mapcar (lambda (x y) (list (q6-eq-rel) x y)) xs ys)))
     (list 'forall (append xs ys)
           (list 'implies
-                (cons 'and hyps)
-                (list 'implies (cons r xs) (cons r ys))))))
+                (if (endp hyps) t (cons 'and hyps))
+                (list 'iff (cons r xs) (cons r ys))))))
 
 (defun q6-equality-axioms (f)
   (multiple-value-bind (fs rs)
@@ -1876,12 +2022,10 @@ Examples
        (t nil)))))
 
 (defun fo-val (f)
-  (if (q6-ground-valid-p f)
-      'valid
-    (let* ((noeq (q6-replace-equality f))
-           (axioms (q6-equality-axioms f))
-           (full (list 'implies (cons 'and axioms) noeq)))
-      (fo-no=-val full))))
+  (let* ((noeq (q6-replace-equality f))
+         (axioms (q6-equality-axioms f))
+         (full (list 'implies (cons 'and axioms) noeq)))
+    (fo-no=-val full)))
 
 (defparameter *q6-tests*
   '((= c c)
